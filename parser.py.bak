@@ -39,29 +39,32 @@ class Parser:
 		bytes = self.dongle.read(1000)
 		for b in bytes:
 			self.parser.send(ord(b))	# Send each byte to the generator
-
 	def write_serial(self, string):
 		self.dongle.write(string)
 	
 	def start_raw_recording(self, file_name):
 		self.raw_file = file(file_name, "wt")
 		self.raw_start_time = time()
-
+	def start_esense_recording(self, file_name):
+		self.esense_file = file(file_name, "wt")
+		self.esense_start_time = time()
 	def stop_raw_recording(self):
 		if self.raw_file:
 			self.raw_file.close()
 			self.raw_file = None
 		
+	def stop_esense_recording(self):
+		if self.esense_file:
+			self.esense_file.close()
+			self.esense_file = None
 	def run(self):
 		"""
 			This generator parses one byte at a time.
 		"""
 		last = time()
 		i = 1
-		blah = 0 #Counts data points sequntially coming off the device
 		self.buffer_len = 512*3
 		times = []
-
 		while 1:
 			byte = yield
 			if byte== 0xaa:
@@ -83,28 +86,21 @@ class Parser:
 								row_length = yield
 								a = yield
 								b = yield
-								value = struct.unpack("<h",chr(a)+chr(b))[0] #half word little endian
+								value = struct.unpack("<h",chr(a)+chr(b))[0]
 								self.raw_values.append(value)
 								if len(self.raw_values)>self.buffer_len:
 									self.raw_values = self.raw_values[-self.buffer_len:]
 								left-=2
-
 								
 								if self.raw_file:
 									t = time()-self.raw_start_time
-									blah += 1
-									self.raw_file.write("%i,%f,%i\n" %(blah, t, value))
-
-							elif packet_code == 0x02 and blah > 0: # Poor signal
+									self.raw_file.write("%f,%f\n" %(t, value))
+							elif packet_code == 0x02: # Poor signal
 								a = yield
-								blah += 1
-								bunk = 666
 								self.poor_signal = a
-								self.raw_file.write("%i,%f,%i\n" %(blah, t, bunk))
 								if a>0:
 									pass 
 								left-=1
-
 							elif packet_code == 0x04: # Attention (eSense)
 								a = yield
 								if a>0:

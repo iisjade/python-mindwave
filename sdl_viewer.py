@@ -1,16 +1,18 @@
+#!/usr/bin/env python
+import time
 import pygame, sys
 from numpy import *
 from pygame.locals import *
 import scipy
 from pyeeg import bin_power
+from parser import Parser
+
 pygame.init()
 
 fpsClock= pygame.time.Clock()
 
 window = pygame.display.set_mode((1280,720))
 pygame.display.set_caption("Mindwave Viewer")
-
-from parser import Parser
 
 p = Parser()
 
@@ -35,8 +37,6 @@ iteration = 0
 meditation_img = font.render("Meditation", False, redColor)
 attention_img = font.render("Attention", False, redColor)
 
-record_baseline = False
-
 while True:
 	p.update()
 	window.blit(background_img,(0,0))
@@ -45,7 +45,8 @@ while True:
 		
 		flen = 50
 			
-		if len(p.raw_values)>=500:
+		#if len(p.raw_values)>=500: #kjs May 2013
+		if 0:
 			spectrum, relative_spectrum = bin_power(p.raw_values[-p.buffer_len:], range(flen),512)
 			spectra.append(array(relative_spectrum))
 			if len(spectra)>30:
@@ -105,12 +106,11 @@ while True:
 				pygame.quit()
 				sys.exit()
 			elif event.key == K_F7:
-				record_baseline = True
-				p.start_raw_recording("baseline_raw.csv")
-				p.start_esense_recording("baseline_esense.csv")
+				dirpath = "/home/dream/data/"
+				file_suffix = ".csv"
+				file_name = dirpath + time.strftime('%Y%m%d%H%M%S') + file_suffix
+				p.start_raw_recording(file_name)
 			elif event.key == K_F8:
-				record_baseline = False
-				p.stop_esense_recording()
 				p.stop_raw_recording()
 	pygame.display.update()
 	fpsClock.tick(30)
