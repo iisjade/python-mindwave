@@ -38,79 +38,83 @@ meditation_img = font.render("Meditation", False, redColor)
 attention_img = font.render("Attention", False, redColor)
 
 while True:
-	p.update()
-	window.blit(background_img,(0,0))
-	if p.sending_data:
-		iteration+=1
-		
-		flen = 50
-			
-		#if len(p.raw_values)>=500: #kjs May 2013
-		if 0:
-			spectrum, relative_spectrum = bin_power(p.raw_values[-p.buffer_len:], range(flen),512)
-			spectra.append(array(relative_spectrum))
-			if len(spectra)>30:
-				spectra.pop(0)
-				
-			spectrum = mean(array(spectra),axis=0)
-			for i in range (flen-1):
-				value = float(spectrum[i]*1000) 
-				if i<3:
-					color = deltaColor
-				elif i<8:
-					color = thetaColor
-				elif i<13:
-					color = alphaColor
-				elif i<30:
-					color = betaColor
-				else:
-					color = gammaColor
-				pygame.draw.rect(window, color, (25+i*10,400-value, 5,value))
-		else:
-			pass
-		pygame.draw.circle(window,redColor, (800,200),p.current_attention/2)
-		pygame.draw.circle(window,greenColor, (800,200),60/2,1)
-		pygame.draw.circle(window,greenColor, (800,200),100/2,1)
-		window.blit(attention_img, (760,260))
-		pygame.draw.circle(window,redColor, (700,200),p.current_meditation/2)
-		pygame.draw.circle(window,greenColor, (700,200),60/2,1)
-		pygame.draw.circle(window,greenColor, (700,200),100/2,1)
-		
-		window.blit(meditation_img, (600,260))
-		if len(p.current_vector)>7:
-			m = max(p.current_vector)
-			for i in range(7):
-				value = p.current_vector[i] *100.0/m
-				pygame.draw.rect(window, redColor, (600+i*30,450-value, 6,value))
+  p.update()
+  window.blit(background_img,(0,0))
+  if p.sending_data:
+    iteration+=1
+    
+    flen = 50
+      
+    #if len(p.raw_values)>=500: #kjs May 2013
+    if 0:
+      spectrum, relative_spectrum = bin_power(p.raw_values[-p.buffer_len:], range(flen),512)
+      spectra.append(array(relative_spectrum))
+      if len(spectra)>30:
+        spectra.pop(0)
+        
+      spectrum = mean(array(spectra),axis=0)
+      for i in range (flen-1):
+        value = float(spectrum[i]*1000) 
+        if i<3:
+          color = deltaColor
+        elif i<8:
+          color = thetaColor
+        elif i<13:
+          color = alphaColor
+        elif i<30:
+          color = betaColor
+        else:
+          color = gammaColor
+        pygame.draw.rect(window, color, (25+i*10,400-value, 5,value))
+    else:
+      pass
+    pygame.draw.circle(window,redColor, (800,200),p.current_attention/2)
+    pygame.draw.circle(window,greenColor, (800,200),60/2,1)
+    pygame.draw.circle(window,greenColor, (800,200),100/2,1)
+    window.blit(attention_img, (760,260))
+    pygame.draw.circle(window,redColor, (700,200),p.current_meditation/2)
+    pygame.draw.circle(window,greenColor, (700,200),60/2,1)
+    pygame.draw.circle(window,greenColor, (700,200),100/2,1)
+    
+    window.blit(meditation_img, (600,260))
+    if len(p.current_vector)>7:
+      m = max(p.current_vector)
+      for i in range(7):
+        value = p.current_vector[i] *100.0/m
+        pygame.draw.rect(window, redColor, (600+i*30,450-value, 6,value))
 
-		if raw_eeg:
-			lv = 0
-			for i,value in enumerate(p.raw_values[-1000:]):
-				v = value/ 255.0/ 5
-				pygame.draw.line(window, redColor, (i+25,500-lv),(i+25, 500-v))
-				lv = v
-	else:
-		img = font.render("Mindwave Headset is not sending data... Press F5 to autoconnect or F6 to disconnect.", False, redColor)
-		window.blit(img,(100,100))
-	
-	for event in pygame.event.get():
-		if event.type==QUIT:
-			pygame.quit()
-			sys.exit()
-		if event.type==KEYDOWN:
-			if event.key== K_F5:
-				p.write_serial("\xc2")
-			elif event.key== K_F6:
-				p.write_serial("\xc1")
-			elif event.key==K_ESCAPE:
-				pygame.quit()
-				sys.exit()
-			elif event.key == K_F7:
-				dirpath = "/home/dream/data/"
-				file_suffix = ".csv"
-				file_name = dirpath + time.strftime('%Y%m%d%H%M%S') + file_suffix
-				p.start_raw_recording(file_name)
-			elif event.key == K_F8:
-				p.stop_raw_recording()
-	pygame.display.update()
-	fpsClock.tick(30)
+    if raw_eeg:
+      lv = 0
+      for i,value in enumerate(p.raw_values[-1000:]):
+        v = value/ 255.0/ 5
+        pygame.draw.line(window, redColor, (i+25,500-lv),(i+25, 500-v))
+        lv = v
+  else:
+    img = font.render("Mindwave Headset is not sending data... Press F5 to autoconnect or F6 to disconnect.", False, redColor)
+    window.blit(img,(100,100))
+  
+  for event in pygame.event.get():
+    if event.type==QUIT:
+      pygame.quit()
+      sys.exit()
+    if event.type==KEYDOWN:
+      if event.key== K_F5:
+        p.write_serial("\xc2")
+      elif event.key== K_F6:
+        p.write_serial("\xc1")
+      elif event.key==K_ESCAPE:
+        pygame.quit()
+        sys.exit()
+      elif event.key == K_F7:
+        dirpath = "/home/dream/data/"
+        file_suffix_csv = ".csv"
+        file_suffix_pkt = ".pkt"
+        file_name = dirpath + time.strftime('%Y%m%d%H%M%S') + file_suffix_csv
+        packet_file_name = dirpath + time.strftime('%Y%m%d%H%M%S') + file_suffix_pkt
+        p.start_raw_recording(file_name)
+        p.start_packet_recording(packet_file_name)
+      elif event.key == K_F8:
+        p.stop_raw_recording()
+        p.stop_packet_recording()
+  pygame.display.update()
+  fpsClock.tick(30)
