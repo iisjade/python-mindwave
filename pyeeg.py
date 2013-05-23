@@ -158,11 +158,11 @@ def embed_seq(X,Tau,D):
 	N =len(X)
 
 	if D * Tau > N:
-		print "Cannot build such a matrix, because D * Tau > N" 
+		print("Cannot build such a matrix, because D * Tau > N") 
 		exit()
 
 	if Tau<1:
-		print "Tau has to be at least 1"
+		print("Tau has to be at least 1")
 		exit()
 
 	Y=zeros((N - (D - 1) * Tau, D))
@@ -642,7 +642,7 @@ def ap_entropy(X, M, R):
 	# in case there is 0 after counting. Log(0) is undefined.
 
 	for i in xrange(0, N - M):
-#		print i
+#		print(i)
 		for j in xrange(i, N - M): # start from i, self-match counts in ApEn
 #			if max(abs(Em[i]-Em[j])) <= R:# compare N-M scalars in each subseq v 0.01b_r1
 			if in_range(Em[i], Em[j], R):
@@ -843,8 +843,8 @@ def dfa(X, Ave = None, L = None):
 	for i in xrange(0,len(L)):
 		n = int(L[i])						# for each box length L[i]
 		if n==0:
-			print "time series is too short while the box length is too big"
-			print "abort"
+			print("time series is too short while the box length is too big")
+			print("abort")
 			exit()
 		for j in xrange(0,len(X),n): # for each box
 			if j+n < len(X):
