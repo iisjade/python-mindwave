@@ -32,7 +32,7 @@ background_img = pygame.image.load("sdl_viewer_background.png")
 font = pygame.font.Font("freesansbold.ttf",20)
 raw_eeg = True
 spectra = []
-iteration = 0
+# iteration = 0
 
 meditation_img = font.render("Meditation", False, redColor)
 attention_img = font.render("Attention", False, redColor)
@@ -41,7 +41,7 @@ while True:
   p.update()
   window.blit(background_img,(0,0))
   if p.sending_data:
-    iteration+=1
+    # iteration+=1
     
     flen = 50
       

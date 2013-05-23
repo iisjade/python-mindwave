@@ -18,9 +18,9 @@ class UtilityFunctions:
   def write_raw(self, file_handle, counter, value):
     if file_handle:
       file_handle.write("%i, %i\n" % (counter, value))
-  def write_packet(self, file_handle, bval):
+  def write_packet(self, file_handle, bval, nval):
     if file_handle:
-      file_handle.write("%i," % bval)
+      file_handle.write("%i|%s\n" % (bval, nval))
 
 class MindWavePacketCodeVals:
   def __init__(self):
@@ -60,6 +60,7 @@ class Parser:
     
   def update(self):
     bytes = self.dongle.read(1000)
+    # bytes = self.dongle.read(5000) kjs May 2013
     for b in bytes:
       self.parser.send(ord(b))  # Send each byte to the generator
 
@@ -105,19 +106,19 @@ class Parser:
       # first, check packet sync
       # packet synced by 0xaa 0xaa
       byte = yield
-      self.utility.write_packet(self.packet_file, byte)
       if byte != 0xaa:
+        self.utility.write_packet(self.packet_file, byte, "!0xaa")
         continue
       byte = yield
-      self.utility.write_packet(self.packet_file, byte)
       if byte != 0xaa:
+        self.utility.write_packet(self.packet_file, byte, "!0xaa")
         continue
       # packet sync confirmed
       # read length and code
       packet_length = yield
-      self.utility.write_packet(self.packet_file, packet_length)
+      self.utility.write_packet(self.packet_file, packet_length, "packet_length")
       packet_code = yield
-      self.utility.write_packet(self.packet_file, packet_code)
+      self.utility.write_packet(self.packet_file, packet_code, "packet_code")
       if packet_code == self.packet_code.standby:  # 0xd4
         self.dongle_state= "standby"
         continue
@@ -131,11 +132,11 @@ class Parser:
         self.utility.write_raw(self.raw_file, counter, 0-counter)
         if packet_code == self.packet_code.raw_value:  # 0x80
           row_length = yield
-          self.utility.write_packet(self.packet_file, row_length)
+          self.utility.write_packet(self.packet_file, row_length, "row_length")
           a = yield
-          self.utility.write_packet(self.packet_file, a)
+          self.utility.write_packet(self.packet_file, a, "a")
           b = yield
-          self.utility.write_packet(self.packet_file, b)
+          self.utility.write_packet(self.packet_file, b, "b")
           value = struct.unpack("<h",chr(a)+chr(b))[0]
           self.raw_values.append(value)
           if len(self.raw_values) > self.buffer_len:
@@ -144,16 +145,13 @@ class Parser:
           self.utility.write_raw(self.raw_file, counter, value)
         elif packet_code == self.packet_code.poor_signal:  # 0x02
           a = yield
-          self.utility.write_packet(self.packet_file, a)
           self.poor_signal = a
           if a > 0:
             pass 
           left -= 1
-          bs = 11111111111111111111111111
-          self.utility.write_raw(self.raw_file, counter, bs)
+          self.utility.write_raw(self.raw_file, counter, a)
         elif packet_code == self.packet_code.esense_attention:  #  0x04
           a = yield
-          self.utility.write_packet(self.packet_file, a)
           if a > 0 :
             v = struct.unpack("b",chr(a))[0]
             if v > 0:
@@ -162,7 +160,6 @@ class Parser:
           left -= 1
         elif packet_code == self.packet_code.esense_meditation:  #  0x05
           a = yield
-          self.utility.write_packet(self.packet_file, a)
           if a > 0:
             v = struct.unpack("b",chr(a))[0]
             if v > 0:
@@ -171,18 +168,13 @@ class Parser:
           left -= 1
         elif packet_code == self.packet_code.sensor_data:  # 0x83
           vlength = yield
-          self.utility.write_packet(self.packet_file, vlength)
           self.current_vector = []
           for row in range(8):
             a = yield
-            self.utility.write_packet(self.packet_file, a)
             b = yield
-            self.utility.write_packet(self.packet_file, b)
             c = yield
-            self.utility.write_packet(self.packet_file, c)
             value = a*255*255+b*255+c
             self.current_vector.append(value)
           left -= vlength
         packet_code = yield
-        self.utility.write_packet(self.packet_file, packet_code)
 
