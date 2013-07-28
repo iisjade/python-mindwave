@@ -1,7 +1,7 @@
 from collections import deque, defaultdict
 from itertools import count
-from time import sleep, time
 import struct
+import time
 import serial
 
 #####
@@ -10,16 +10,17 @@ def main():
   simple_test()
 
 def simple_test():
-  testfile = 'simple_data'
+  raw_file = 'simple_data'
+  parsed_file = 'parsed_data'
   dongle = Dongle()
   try:
     dongle.connect()
     print "Connected. Writing to foo... Hit ^C to stop."
-    with open(testfile, 'wb') as f:
-      dongle.write_everything_to_file_from_now_on(f)
+    with open(raw_file, 'wb') as raw_data, open(parsed_file, 'w') as parsed_data:
+      dongle.write_raw_and_parsed_files_from_now_on(raw_data, parsed_data)
   except KeyboardInterrupt:
-    print "Disconnecting dongle"
     dongle.disconnect()
+    print "Disconnecting dongle"
 
 #####
 
@@ -33,7 +34,7 @@ class Syncbuf:
                   str(self.sequence_number),
                   str(self.buf)])
     s = '\n'.join([s,''])
-   return s
+    return s
 
 class ThinkGearProtocol:
   cmd_auto_connect = bytearray([0xc2])
@@ -141,7 +142,6 @@ class Packer:
     except StopIteration:
       print "stopped 1"
       return False 
-      # assert paylen <= 169
     if paylen > 169:
       if paylen == self.protocol.syncbyte:  
         print "sync packet"
@@ -160,12 +160,15 @@ class Packer:
     it = iter(sb.buf)
     paylen = it.next()
     signed_16_bit_val_parser = struct.Struct('>h')
+    # Initializing co-routines 
     sq = Plexer.signal_quality()
-    sq.send(None)
+    sq.send(None) #OR sq.next()
     rd = Plexer.raw_data()
     rd.send(None)
     pb = Plexer.power_bin()
     pb.send(None)
+    be = Plexer.blink_event() 
+    be.send(None)
     while paylen > 0:
       try:
         codetype = it.next()
@@ -173,21 +176,20 @@ class Packer:
       except StopIteration:
         print "stopped 3 (codetype)"
         break
-      try:
-        codon = Packer.protocol.codex[codetype]
+      try: codon = Packer.protocol.codex[codetype]
       except KeyError:
         print "parse error unknown codetype ", codetype
         break
       if codon[0] > 1:  # datalen
         datalen = it.next()
         paylen -= 1
-      else:
-        datalen = 1
+      else: datalen = 1
       assert datalen == codon[0]
       if datalen == 1:
         assert codetype < 0x80
         val = it.next() 
         if codetype == 0x02: sq.send(val)
+        elif codetype == 0x16: be.send(val)
       elif datalen == 2:
         # assert codetype == 0x80
         a = it.next()
@@ -200,8 +202,9 @@ class Packer:
         val = t[0]
         rd.send(val)
         scaled = ( val + 1000 ) / 50
-        # print "%12s %6i %s" % (codon, val, ')'.rjust(scaled,'-'))
+        print "%12s %6i %s" % (codon, val, ')'.rjust(scaled,'-'))
       else:
+        # assert datalen == 24
         for j in range(0, datalen, 3):
           a = it.next()
           b = it.next()
@@ -247,123 +250,72 @@ class Plexer:
     while True:
       val = yield
       print "Power Bin: ", val
+  @staticmethod
+  def blink_event():
+    while True:
+      val = yield
+      print "Blink Event: ", val
 
-
-    
 class Tester:
   def __init__(self):
     self.filepath = '/home/dream/brain_hackary/data/Foo.txt'
-    with open(self.filepath, 'rb') as f:
-      self.src = f.read()
+    # with open(self.filepath, 'rb') as f:
+    #   self.src = f.read()
+    self.src = Dongle.ser.read()
     self.pack = Packer(self.src)
   def testit(self):
     return self.pack.dumploop()
     # return self.pack.checkloop()
 
-
-#####
-
-
 class Dongle:
-  
+  cmd_auto_connect = bytearray([0xc2])
+  cmd_disconnect = bytearray([0xc1])
   start_of_connected_status_packet = [ 0xaa, 0xaa, 0x04, 0xd0 ]
-  trailer = deque([], len(start_of_connected_status_packet))
-
   def __init__(self):
     self.buffer = []
     self.is_connected = False
     self.index_into_connection_packet = 0
     self.open()
-
   def open(self):
     baudrate = 115200
     port = '/dev/ttyUSB0'
     timeout = 0.1
     self.ser = serial.Serial(port=port, baudrate=baudrate, timeout=timeout)
-
-  def print_buffer(self, buf, num_bytes):
-    print "buffer:",
-    for i in range(num_bytes):
-      print "%02x" % buf[i],
-    print
-
   def read(self):
     buffer = bytearray(256)
     num_bytes_read = self.ser.readinto(buffer)
-    self.print_buffer(buffer, num_bytes_read)
-    return memoryview(buffer)[:num_bytes_read]
-
-  def farse(self, buf):
     # parse it, and set flags
-    conlen = len(Dongle.start_of_connected_status_packet)
-    for b in buf:
+    for i in range(num_bytes_read):
+      b = buffer[i]
       if b == Dongle.start_of_connected_status_packet[self.index_into_connection_packet]:
         self.index_into_connection_packet += 1
-        if self.index_into_connection_packet >= conlen:
+        if self.index_into_connection_packet >= len(Dongle.start_of_connected_status_packet):
           self.is_connected = True
           self.index_into_connection_packet = 0
       else:
         self.index_into_connection_packet = 0
-
-  def farse(self, buf):
-    # parse it, and set flags
-    conlen = len(Dongle.start_of_connected_status_packet)
-    for b in buf:
-      if b == Dongle.start_of_connected_status_packet[self.index_into_connection_packet]:
-        self.index_into_connection_packet += 1
-        if self.index_into_connection_packet >= conlen:
-          self.is_connected = True
-          self.index_into_connection_packet = 0
-      else:
-        self.index_into_connection_packet = 0
-
   def connect(self):
     while True:
-      ptr = self.read()
-      self.farse(ptr)
+      self.read()
       if self.is_connected:
         return
-      self.ser.write(self.ctl.cmd_auto_connect)
+      self.ser.write(Dongle.cmd_auto_connect)
+      print "Cannot connect, sleeping for 2s"
       time.sleep(2)
-
   def write_everything_to_file_from_now_on(self, f):
     while True:
       f.write(self.ser.read())
-
+  def write_raw_and_parsed_files_from_now_on(self, raw_f, parsed_f):
+    while True:
+      bufbytes = self.ser.read()
+      raw_f.write(bufbytes)
+      # Send raw data stream through parser, and write parsed data to file.
+      parsedbytes = Sync(src=bufbytes)
+      parsed_f.write(parsedbytes)
   def disconnect(self):
-    self.ser.write(self.ctl.cmd_disconnect)
+    self.ser.write(Dongle.cmd_disconnect)
     self.is_connected = False
+
 
 if __name__ == '__main__':
   main()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
