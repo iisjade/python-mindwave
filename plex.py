@@ -7,34 +7,22 @@ import serial
 #####
 
 def main():
-  simple_test()
+  write_raw_test()
 
-def simple_test():
-  raw_file = 'simple_data'
+def write_raw_test():
+  raw_file = 'raw_data'
   parsed_file = 'parsed_data'
   dongle = Dongle()
   try:
     dongle.connect()
-    print "Connected. Writing to foo... Hit ^C to stop."
-    with open(raw_file, 'wb') as raw_data, open(parsed_file, 'w') as parsed_data:
-      dongle.write_raw_and_parsed_files_from_now_on(raw_data, parsed_data)
+    print "Connected. Writing ./raw_data... Hit ^C to stop."
+    with open(raw_file, 'wb') as raw_data:
+      dongle.write_raw_file(raw_data)
   except KeyboardInterrupt:
     dongle.disconnect()
     print "Disconnecting dongle"
 
 #####
-
-class Syncbuf:
-  def __init__(self, sequence_number, timestamp, buf):
-    self.sequence_number = sequence_number
-    self.timestamp = timestamp
-    self.buf = buf
-  def trace(self):
-    s = ','.join([str(self.timestamp),
-                  str(self.sequence_number),
-                  str(self.buf)])
-    s = '\n'.join([s,''])
-    return s
 
 class ThinkGearProtocol:
   cmd_auto_connect = bytearray([0xc2])
@@ -66,77 +54,34 @@ class ThinkGearProtocol:
 
 class Sync:
   protocol = ThinkGearProtocol
-  def __init__(self, src):
-    assert src
-    self.src = src
-    self.src_it = iter(src) 
+  def __init__(self):
     self.syncer = deque([], Sync.protocol.syncnum)
-    self.seqint = count()
-    self.sb = None
-    self.buf = None
-  @classmethod
-  def b_synced(cls, buf):
-    ctl = cls.protocol
-    # assert len(buf) <= ctl.syncnum
-    return ctl.syncnum == buf.count(ctl.syncbyte)
-  def synced(self):
-    return self.b_synced(self.syncer)
-  def slurp_one(self):
-    b = self.src_it.next()
-    i = ord(b)
-    return i
-  def slurp(self):
-    while True:
-      yield self.slurp_one()
-  def check_sync(self, b):
+  def synced(self, b):
     self.syncer.append(b)
-    return self.synced()
-  def stampbuf(self):
-    timestamp = time()
-    sequence_number = self.seqint.next()
-    buf = list()
-    self.sb = Syncbuf(sequence_number, timestamp, buf)  
-    return self.sb
-  def thru_sync(self):
-    self.syncer.clear()
-    for b in self.slurp():
-      yield b
-      if self.check_sync(b):
-        break
-    # assert self.synced()
-  def thru_checkbyte(self):
-    # assert self.synced()
-    paylen = self.slurp_one()
-    yield paylen
-    # assert paylen <= self.protocol.maxpay
-    for i in range(paylen):
-      yield self.slurp_one()
-    checkbyte = self.slurp_one()
-    yield checkbyte
-  def syncloop(self):
-    while True:
-      sb = self.stampbuf()
-      buf = sb.buf
-      buf.extend(self.thru_sync())
-      print "sync? buf: ", buf
-      buf.extend(self.thru_checkbyte())
-      print "paylen? buf: ", buf
-      yield self.sb
+    return self.syncer.count(Sync.protocol.syncbyte) == len(self.syncer)
+
+class RawBuf:
+  def __init__(self, outfile):
+    self.outfile = outfile
+    self.src = Dongle.bytestream
+    self.outbuf = list()
+    self.buflen = 1024
+  def gobble(self):
+    b = self.src.next()
+    self.outbuf.append(b)
+    if len(self.outbuf) == self.buflen:
+      self.outfile.write(self.outbuf)
+      self.outbuf.clear()
+    yield b
 
 class Packer:
   protocol = ThinkGearProtocol
-  def __init__(self, src):
-    self.src = src
-    self.sync = Sync(src)
-    self.plex = defaultdict(list)
-    self.dump_file = None
-  def dumpfile(self):
-    if self.dump_file == None:
-      filepath = '/home/dream/brain_hackary/data/bar_dump'
-      self.dump_file = open(filepath, 'w')
-    return self.dump_file
-  def checkpay(self, sb):
-    it = iter(sb.buf)
+  def __init__(self):
+    self.filepath = 'raw_data_output'
+    self.rawfile = open(self.filepath, 'wb')
+  def checkpay(self, stampbuf, rawfile):
+    rb = RawBuf(stampbuf, rawfile)
+    it = rb.gobble
     try:
       paylen = it.next()
     except StopIteration:
@@ -145,6 +90,7 @@ class Packer:
     if paylen > 169:
       if paylen == self.protocol.syncbyte:  
         print "sync packet"
+      else:
         print "bogus paylen ", paylen
       return False
     # print "paylen ", paylen
@@ -154,10 +100,10 @@ class Packer:
     except StopIteration:
       print "stopped 2 (paycheck) - prematurely ended packet ?"
       return False
-      print "sum %d, tx %d, dx %d" % (paysum, (~paysum & 0xff), paycheck)
+    print "sum %d, tx %d, dx %d" % (paysum, (~paysum & 0xff), paycheck)
     return (paycheck == (~paysum & 0xff))
-  def payload_gen(self, sb):
-    it = iter(sb.buf)
+  def payload_gen(self, bytestream):
+    it = bytestream
     paylen = it.next()
     signed_16_bit_val_parser = struct.Struct('>h')
     # Initializing co-routines 
@@ -197,7 +143,6 @@ class Packer:
         c = bytearray(2)
         c[0] = a
         c[1] = b
-        # val = (a << 8) + b  # (most significant byte * 256) + (least significant byte)
         t = signed_16_bit_val_parser.unpack(str(c))
         val = t[0]
         rd.send(val)
@@ -213,26 +158,27 @@ class Packer:
           pb.send(val)
       paylen -= datalen
       yield (codetype, val)
-  def payload(self, sb):
-    return list(self.payload_gen(sb))
+  def payload(self, stamped_buffer):
+    return list(self.payload_gen(stamped_buffer))
   def checkloop(self):
-    for sb in self.sync.syncloop():
-      # sb.trace()
-      if not sb.buf:
-        break
-      if self.checkpay(sb):
-        yield self.payload(sb)
-  def dumploop(self):
-    with self.dumpfile() as f:
-      print "opened file"
-      for sb in self.sync.syncloop():
-        if not sb.buf:
-          print "no sb.buf, exiting at sb %d" % sb.sequence_number
-          break
-        if self.checkpay(sb):
-          s = sb.trace()
-          # print s
-          f.write(s)
+    seq = count()
+    while True: 
+      stamped_buffer = Syncbuf(seq.next())
+      stamped_buffer.trace()
+      if self.checkpay(stamped_buffer):
+        yield self.payload(stamped_buffer)
+
+class Syncbuf:
+  def __init__(self, sequence_number):
+    self.sequence_number = sequence_number
+    self.timestamp = time.time()
+    self.buf = list()
+  def trace(self):
+    s = ','.join([str(self.timestamp),
+                  str(self.sequence_number),
+                  str(self.buf)])
+    s = '\n'.join([s,''])
+    return s
 
 class Plexer:
   @staticmethod
@@ -256,64 +202,50 @@ class Plexer:
       val = yield
       print "Blink Event: ", val
 
-class Tester:
-  def __init__(self):
-    self.filepath = '/home/dream/brain_hackary/data/Foo.txt'
-    # with open(self.filepath, 'rb') as f:
-    #   self.src = f.read()
-    self.src = Dongle.ser.read()
-    self.pack = Packer(self.src)
-  def testit(self):
-    return self.pack.dumploop()
-    # return self.pack.checkloop()
-
 class Dongle:
-  cmd_auto_connect = bytearray([0xc2])
-  cmd_disconnect = bytearray([0xc1])
-  start_of_connected_status_packet = [ 0xaa, 0xaa, 0x04, 0xd0 ]
+  protocol = ThinkGearProtocol
   def __init__(self):
     self.buffer = []
     self.is_connected = False
-    self.index_into_connection_packet = 0
-    self.open()
-  def open(self):
     baudrate = 115200
     port = '/dev/ttyUSB0'
     timeout = 0.1
     self.ser = serial.Serial(port=port, baudrate=baudrate, timeout=timeout)
-  def read(self):
-    buffer = bytearray(256)
-    num_bytes_read = self.ser.readinto(buffer)
-    # parse it, and set flags
-    for i in range(num_bytes_read):
-      b = buffer[i]
-      if b == Dongle.start_of_connected_status_packet[self.index_into_connection_packet]:
-        self.index_into_connection_packet += 1
-        if self.index_into_connection_packet >= len(Dongle.start_of_connected_status_packet):
-          self.is_connected = True
-          self.index_into_connection_packet = 0
-      else:
-        self.index_into_connection_packet = 0
   def connect(self):
+    index_into_connection_packet = 0
     while True:
-      self.read()
+      buffer = bytearray(256)
+      num_bytes_read = self.ser.readinto(buffer)
+      # parse it, and set flags
+      for i in range(num_bytes_read):
+        b = buffer[i]
+        if b == Dongle.protocol.start_of_connected_status_packet[index_into_connection_packet]:
+          index_into_connection_packet += 1
+          if index_into_connection_packet >= len(Dongle.protocol.start_of_connected_status_packet):
+            self.is_connected = True
+            index_into_connection_packet = 0
+        else:
+          index_into_connection_packet = 0
       if self.is_connected:
         return
-      self.ser.write(Dongle.cmd_auto_connect)
+      self.ser.write(Dongle.protocol.cmd_auto_connect)
       print "Cannot connect, sleeping for 2s"
       time.sleep(2)
-  def write_everything_to_file_from_now_on(self, f):
-    while True:
-      f.write(self.ser.read())
-  def write_raw_and_parsed_files_from_now_on(self, raw_f, parsed_f):
+  def write_raw_file(self, raw_f):
     while True:
       bufbytes = self.ser.read()
       raw_f.write(bufbytes)
+  def bytestream(self):
+    while True:
+      bufbytes = self.ser.read()
       # Send raw data stream through parser, and write parsed data to file.
-      parsedbytes = Sync(src=bufbytes)
-      parsed_f.write(parsedbytes)
+      for b in bufbytes:
+        yield b
+# parser needs to handle stream
+# stream as presented by serial read API
+#   is a sequence of strings
   def disconnect(self):
-    self.ser.write(Dongle.cmd_disconnect)
+    self.ser.write(Dongle.protocol.cmd_disconnect)
     self.is_connected = False
 
 
