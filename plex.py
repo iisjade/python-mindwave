@@ -1,5 +1,5 @@
 from collections import deque, defaultdict
-from itertools import count
+from itertools import count, takewhile
 import struct
 import time
 import serial
@@ -9,27 +9,11 @@ import serial
 def main():
   write_raw_test()
 
-def write_raw_test():
-  raw_file = 'raw_data'
-  parsed_file = 'parsed_data'
-  dongle = Dongle()
-  try:
-    dongle.connect()
-    print "Connected. Writing ./raw_data... Hit ^C to stop."
-    with open(raw_file, 'wb') as raw_data:
-      dongle.write_raw_file(raw_data)
-  except KeyboardInterrupt:
-    dongle.disconnect()
-    print "Disconnecting dongle"
-
 #####
 
 class ThinkGearProtocol:
-  cmd_auto_connect = bytearray([0xc2])
-  cmd_disconnect = bytearray([0xc1])
-  start_of_connected_status_packet = [ 0xaa, 0xaa, 0x04, 0xd0 ]
-  syncbyte = 0xaa
   syncnum = 2
+  syncbyte = 0xaa
   maxpay = 169
   codex = {
     0x02: (1, '(inverse) signal quality'),
@@ -40,17 +24,11 @@ class ThinkGearProtocol:
     0x80: (2, 'raw eeg'),
     0x83: (24, 'power bands')
   }
-  conex = {
-    0xd0: (3, 'headset connected'),
-    0xd1: (2, 'headset not found'),
-    0xd2: (3, 'headset disconnected'),
-    0xd3: (0, 'request denied'),
-    0xd4: (1, 'scan / standby')
-  }
-  signed_16_bit_val_parser = struct.Struct('>h')
-  @classmethod
-  def parse_raw_eeg(cls, buf):
-    return cls.signed_16_bit_val_parser.unpack_from(buf)
+  disconnect_byte = 0xc1
+  autoconnect_byte = 0xc2
+  connected_code = 0xd0
+  disconnected_code = 0xd2
+  signed_16_bit_big_endian = struct.Struct('>h').unpack
 
 class Sync:
   protocol = ThinkGearProtocol
@@ -58,54 +36,100 @@ class Sync:
     self.syncer = deque([], Sync.protocol.syncnum)
   def synced(self, b):
     self.syncer.append(b)
-    return self.syncer.count(Sync.protocol.syncbyte) == len(self.syncer)
+    return self.syncer.count(Sync.protocol.syncbyte) == Sync.protocol.syncnum
+  def reset(self):
+    self.syncer.clear()
+  def sync_it(self, src):
+    self.reset()
+    while not self.synced(src.next()):
+      pass
 
-class RawBuf:
-  def __init__(self, outfile):
-    self.outfile = outfile
-    self.src = Dongle.bytestream
-    self.outbuf = list()
-    self.buflen = 1024
-  def gobble(self):
-    b = self.src.next()
-    self.outbuf.append(b)
-    if len(self.outbuf) == self.buflen:
-      self.outfile.write(self.outbuf)
-      self.outbuf.clear()
-    yield b
-
-class Packer:
+class Dongle:
   protocol = ThinkGearProtocol
   def __init__(self):
-    self.filepath = 'raw_data_output'
-    self.rawfile = open(self.filepath, 'wb')
-  def checkpay(self, stampbuf, rawfile):
-    rb = RawBuf(stampbuf, rawfile)
-    it = rb.gobble
-    try:
-      paylen = it.next()
-    except StopIteration:
-      print "stopped 1"
-      return False 
-    if paylen > 169:
-      if paylen == self.protocol.syncbyte:  
-        print "sync packet"
-      else:
-        print "bogus paylen ", paylen
-      return False
-    # print "paylen ", paylen
-    paysum = sum(it.next() for i in range(paylen))
-    try:
-      paycheck = it.next()
-    except StopIteration:
-      print "stopped 2 (paycheck) - prematurely ended packet ?"
-      return False
-    print "sum %d, tx %d, dx %d" % (paysum, (~paysum & 0xff), paycheck)
-    return (paycheck == (~paysum & 0xff))
-  def payload_gen(self, bytestream):
-    it = bytestream
+    baudrate = 115200
+    port = '/dev/ttyUSB0'  # TODO handle arbitrary (changed) dev address
+    timeout = 0.01
+    try: self.ser = serial.Serial(port=port, baudrate=baudrate, timeout=timeout)
+    except:
+      for i in range(1,4):
+        port = '/dev/ttyUSB' + str(i)
+        try: self.ser = serial.Serial(port=port, baudrate=baudrate, timeout=timeout)
+        except: continue
+  def control(self, val):
+    self.ser.write(bytearray([val]))
+  def connect(self):
+    self.control(self.protocol.autoconnect_byte)
+  def disconnect(self):
+    print 'sending disconnect'
+    self.control(self.protocol.disconnect_byte)
+  def bytevals(self):
+    bufsize = 1024
+    buf = bytearray(bufsize)
+    while True:
+      n = self.ser.readinto(buf)
+      for i in range(n): 
+        b = buf[i] 
+        yield b
+
+class Payloader:
+  def __init__(self, src):
+    self.protocol = ThinkGearProtocol
+    self.src = src
+    self.syncer = Sync()
+  def read_sync(self):
+    it = self.src
+    self.syncer.reset()
+    while not self.syncer.synced(it.next()):
+      pass
+  def read_paylen_payload_and_checksum(self):
+    it = self.src
     paylen = it.next()
-    signed_16_bit_val_parser = struct.Struct('>h')
+    if paylen <= self.protocol.maxpay:
+      payload = [it.next() for i in range(paylen)] 
+      paycheck = it.next()
+    else:
+      payload = None
+      paycheck = None
+    payout = (paylen, payload, paycheck)
+    return payout
+  def parse(self, payout):
+    pass
+
+
+class Packer:
+  def __init__(self):
+    self.protocol = ThinkGearProtocol
+    self.is_connected = False
+    self.dongle = Dongle()
+    self.src = self.dongle.bytevals()
+    self.syncer = Sync()
+  def synced_src(self):
+    self.syncer.sync_it(self.src)
+    return self.src
+  def connect_and_confirm(self):
+    self.dongle.connect()
+    confirmed = False
+    while not confirmed:
+      it = self.synced_src()
+      paylen = it.next()
+      if paylen != 4:
+        continue
+      codetype = it.next()
+      if codetype != self.protocol.connected_code:
+        continue
+      confirmed = True
+      print 'connected!'
+  def disconnect(self):
+    self.dongle.disconnect()
+  def checkpay(self, payout):
+    paylen, payload, paycheck = payout
+    if paylen <= self.protocol.maxpay:
+      return (paycheck == (~sum(payload) & 0xff))
+    return False
+  def payload_gen(self, payout):
+    paylen, payload, paycheck = payout
+    it = iter(payload)
     # Initializing co-routines 
     sq = Plexer.signal_quality()
     sq.send(None) #OR sq.next()
@@ -122,7 +146,7 @@ class Packer:
       except StopIteration:
         print "stopped 3 (codetype)"
         break
-      try: codon = Packer.protocol.codex[codetype]
+      try: codon = self.protocol.codex[codetype]
       except KeyError:
         print "parse error unknown codetype ", codetype
         break
@@ -134,8 +158,10 @@ class Packer:
       if datalen == 1:
         assert codetype < 0x80
         val = it.next() 
-        if codetype == 0x02: sq.send(val)
-        elif codetype == 0x16: be.send(val)
+        if codetype == 0x02: 
+          sq.send(val)
+        elif codetype == 0x16: 
+          be.send(val)
       elif datalen == 2:
         # assert codetype == 0x80
         a = it.next()
@@ -143,11 +169,10 @@ class Packer:
         c = bytearray(2)
         c[0] = a
         c[1] = b
-        t = signed_16_bit_val_parser.unpack(str(c))
+        t = self.protocol.signed_16_bit_big_endian(str(c))
         val = t[0]
         rd.send(val)
-        scaled = ( val + 1000 ) / 50
-        print "%12s %6i %s" % (codon, val, ')'.rjust(scaled,'-'))
+        rd.send(codon)
       else:
         # assert datalen == 24
         for j in range(0, datalen, 3):
@@ -157,97 +182,61 @@ class Packer:
           val = (a << 16) + (b << 8) + c
           pb.send(val)
       paylen -= datalen
-      yield (codetype, val)
-  def payload(self, stamped_buffer):
-    return list(self.payload_gen(stamped_buffer))
+      # yield (codetype, val)
   def checkloop(self):
-    seq = count()
+    pay = Payloader(self.src)
     while True: 
-      stamped_buffer = Syncbuf(seq.next())
-      stamped_buffer.trace()
-      if self.checkpay(stamped_buffer):
-        yield self.payload(stamped_buffer)
-
-class Syncbuf:
-  def __init__(self, sequence_number):
-    self.sequence_number = sequence_number
-    self.timestamp = time.time()
-    self.buf = list()
-  def trace(self):
-    s = ','.join([str(self.timestamp),
-                  str(self.sequence_number),
-                  str(self.buf)])
-    s = '\n'.join([s,''])
-    return s
+      self.syncer.sync_it(self.src)
+      payout = pay.read_paylen_payload_and_checksum()
+      if self.checkpay(payout):
+        self.payload_gen(payout)
+        # pay.parse(payout)
+      else:
+	      print "bogus checksum?"
 
 class Plexer:
+  protocol=ThinkGearProtocol
   @staticmethod
   def signal_quality():
+    counter = 0
     while True:
+      baseline = time.time()
       val = yield
-      print "Signal Quality: ", val
+      counter += 1
+      print "Signal Quality: %s, Count#: %i, Timestamp: %s" % (val, counter, time.time()-baseline)
   @staticmethod
   def raw_data():
     while True:
       val = yield
-      print "Raw Data: ", val
+      codon = yield
+      scaled = ( val + 1000 ) / 50
+      # print "%12s %6i %s" % (codon, val, ')'.rjust(scaled,'-'))
+      # print "Raw Data: ", val
   @staticmethod
   def power_bin():
     while True:
       val = yield
-      print "Power Bin: ", val
+      # print "Power Bin: %s, Timestamp: %s" % (val, time.time())
   @staticmethod
   def blink_event():
     while True:
       val = yield
       print "Blink Event: ", val
 
-class Dongle:
-  protocol = ThinkGearProtocol
-  def __init__(self):
-    self.buffer = []
-    self.is_connected = False
-    baudrate = 115200
-    port = '/dev/ttyUSB0'
-    timeout = 0.1
-    self.ser = serial.Serial(port=port, baudrate=baudrate, timeout=timeout)
-  def connect(self):
-    index_into_connection_packet = 0
-    while True:
-      buffer = bytearray(256)
-      num_bytes_read = self.ser.readinto(buffer)
-      # parse it, and set flags
-      for i in range(num_bytes_read):
-        b = buffer[i]
-        if b == Dongle.protocol.start_of_connected_status_packet[index_into_connection_packet]:
-          index_into_connection_packet += 1
-          if index_into_connection_packet >= len(Dongle.protocol.start_of_connected_status_packet):
-            self.is_connected = True
-            index_into_connection_packet = 0
-        else:
-          index_into_connection_packet = 0
-      if self.is_connected:
-        return
-      self.ser.write(Dongle.protocol.cmd_auto_connect)
-      print "Cannot connect, sleeping for 2s"
-      time.sleep(2)
-  def write_raw_file(self, raw_f):
-    while True:
-      bufbytes = self.ser.read()
-      raw_f.write(bufbytes)
-  def bytestream(self):
-    while True:
-      bufbytes = self.ser.read()
-      # Send raw data stream through parser, and write parsed data to file.
-      for b in bufbytes:
-        yield b
-# parser needs to handle stream
-# stream as presented by serial read API
-#   is a sequence of strings
-  def disconnect(self):
-    self.ser.write(Dongle.protocol.cmd_disconnect)
-    self.is_connected = False
-
 
 if __name__ == '__main__':
   main()
+
+def write_raw_test():
+  raw_file = 'raw_data'
+  parsed_file = 'parsed_data'
+  dongle = Dongle()
+  try:
+    dongle.connect()
+    print "Connected. Writing ./raw_data... Hit ^C to stop."
+    with open(raw_file, 'wb') as raw_data:
+      dongle.write_raw_file(raw_data)
+  except KeyboardInterrupt:
+    dongle.disconnect()
+    print "Disconnecting dongle"
+
