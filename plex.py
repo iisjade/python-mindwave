@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 from collections import deque, defaultdict
 from itertools import count, takewhile
 import struct
@@ -7,13 +9,26 @@ import serial
 #####
 
 def main():
-  write_raw_test()
+  pass
+
+class Utilities:
+  def __init__(self):
+    self.pk = Packer()
+  def evildansclass(self):
+    self.pk.disconnect()
+    self.pk.connect_and_confirm()
+    try: 
+      self.pk.checkloop()
+    except KeyboardInterrupt:
+      self.pk.disconnect()
+      print "Disconnected"
+      raise
 
 #####
 
 class ThinkGearProtocol:
-  syncnum = 2
   syncbyte = 0xaa
+  syncnum = 2
   maxpay = 169
   codex = {
     0x02: (1, '(inverse) signal quality'),
@@ -48,13 +63,15 @@ class Dongle:
   protocol = ThinkGearProtocol
   def __init__(self):
     baudrate = 115200
-    port = '/dev/ttyUSB0'  # TODO handle arbitrary (changed) dev address
-    timeout = 0.01
+    port = '/dev/ttyUSB0'
+    timeout = 5
     try: self.ser = serial.Serial(port=port, baudrate=baudrate, timeout=timeout)
     except:
       for i in range(1,4):
         port = '/dev/ttyUSB' + str(i)
-        try: self.ser = serial.Serial(port=port, baudrate=baudrate, timeout=timeout)
+        try: 
+          self.ser = serial.Serial(port=port, baudrate=baudrate, timeout=timeout)
+          break
         except: continue
   def control(self, val):
     self.ser.write(bytearray([val]))
@@ -64,13 +81,15 @@ class Dongle:
     print 'sending disconnect'
     self.control(self.protocol.disconnect_byte)
   def bytevals(self):
-    bufsize = 1024
+    while True:
+      b = ord(self.ser.read())
+      yield b
+  def xbytevals(self, bufsize=256):
     buf = bytearray(bufsize)
     while True:
       n = self.ser.readinto(buf)
-      for i in range(n): 
-        b = buf[i] 
-        yield b
+      for i in range(n):
+        yield buf[i]
 
 class Payloader:
   def __init__(self, src):
@@ -96,30 +115,35 @@ class Payloader:
   def parse(self, payout):
     pass
 
-
 class Packer:
   def __init__(self):
     self.protocol = ThinkGearProtocol
-    self.is_connected = False
     self.dongle = Dongle()
     self.src = self.dongle.bytevals()
     self.syncer = Sync()
+    self.plexer = Plexer()
+    self.connected = False
+    self.ck_counter = count()
+    self.rd_counter = count()
   def synced_src(self):
     self.syncer.sync_it(self.src)
     return self.src
   def connect_and_confirm(self):
     self.dongle.connect()
-    confirmed = False
-    while not confirmed:
+    while not self.connected:
       it = self.synced_src()
+      print "Synced!"
       paylen = it.next()
       if paylen != 4:
         continue
       codetype = it.next()
+      print codetype,
       if codetype != self.protocol.connected_code:
+        self.disconnect()
         continue
-      confirmed = True
+      self.connected = True
       print 'connected!'
+    return True
   def disconnect(self):
     self.dongle.disconnect()
   def checkpay(self, payout):
@@ -130,15 +154,11 @@ class Packer:
   def payload_gen(self, payout):
     paylen, payload, paycheck = payout
     it = iter(payload)
-    # Initializing co-routines 
-    sq = Plexer.signal_quality()
-    sq.send(None) #OR sq.next()
-    rd = Plexer.raw_data()
-    rd.send(None)
-    pb = Plexer.power_bin()
-    pb.send(None)
-    be = Plexer.blink_event() 
-    be.send(None)
+    # Initialize co-routines 
+    sq = Plexer.plexit(0x02)
+    be = Plexer.plexit(0x16)
+    rd = Plexer.plexit(0x80)
+    pb = Plexer.plexit(0x83)
     while paylen > 0:
       try:
         codetype = it.next()
@@ -150,6 +170,7 @@ class Packer:
       except KeyError:
         print "parse error unknown codetype ", codetype
         break
+      # ...
       if codon[0] > 1:  # datalen
         datalen = it.next()
         paylen -= 1
@@ -160,6 +181,7 @@ class Packer:
         val = it.next() 
         if codetype == 0x02: 
           sq.send(val)
+          sq.send(self.rd_counter)
         elif codetype == 0x16: 
           be.send(val)
       elif datalen == 2:
@@ -172,7 +194,7 @@ class Packer:
         t = self.protocol.signed_16_bit_big_endian(str(c))
         val = t[0]
         rd.send(val)
-        rd.send(codon)
+        rd.send(self.rd_counter.next())
       else:
         # assert datalen == 24
         for j in range(0, datalen, 3):
@@ -192,26 +214,39 @@ class Packer:
         self.payload_gen(payout)
         # pay.parse(payout)
       else:
-	      print "bogus checksum?"
+        self.ck_counter.next()
+	      # print "bogus checksum?" ,payout
+  def run_checkloop(self):
+    try: 
+      self.checkloop()
+    except KeyboardInterrupt:
+      self.disconnect()
+      print "Disconnected"
+      print "bogus checksums %s" % (self.ck_counter,)
+      print "raw data %s" % (self.rd_counter,)
+      raise
+
 
 class Plexer:
   protocol=ThinkGearProtocol
+  def __init__(self):
+    pass
   @staticmethod
   def signal_quality():
-    counter = 0
     while True:
-      baseline = time.time()
       val = yield
-      counter += 1
-      print "Signal Quality: %s, Count#: %i, Timestamp: %s" % (val, counter, time.time()-baseline)
+      rd_counter = yield
+      print "Signal Quality: %i %f" % (val, time.time())
+      print "raw_data counter %s" % (rd_counter,)
   @staticmethod
   def raw_data():
     while True:
       val = yield
-      codon = yield
+      val_count = yield
       scaled = ( val + 1000 ) / 50
       # print "%12s %6i %s" % (codon, val, ')'.rjust(scaled,'-'))
       # print "Raw Data: ", val
+      # print "val #%d: %d" % (val_count, val) 
   @staticmethod
   def power_bin():
     while True:
@@ -222,21 +257,24 @@ class Plexer:
     while True:
       val = yield
       print "Blink Event: ", val
-
+  @staticmethod
+  def plexit(codetype):
+    dispatch = {
+      0x02: Plexer.signal_quality,
+      # 0x04: 'esense attention',
+      # 0x05: 'esense meditation',
+      0x16: Plexer.blink_event,
+      # 0x55: 'extended codetype - not implemented',
+      0x80: Plexer.raw_data,
+      0x83: Plexer.power_bin,
+    }
+    try: cor = dispatch[codetype]
+    except KeyError:
+      print "parse error unknown codetype ", codetype
+      raise
+    ret = cor()
+    ret.send(None)
+    return ret
 
 if __name__ == '__main__':
   main()
-
-def write_raw_test():
-  raw_file = 'raw_data'
-  parsed_file = 'parsed_data'
-  dongle = Dongle()
-  try:
-    dongle.connect()
-    print "Connected. Writing ./raw_data... Hit ^C to stop."
-    with open(raw_file, 'wb') as raw_data:
-      dongle.write_raw_file(raw_data)
-  except KeyboardInterrupt:
-    dongle.disconnect()
-    print "Disconnecting dongle"
-
