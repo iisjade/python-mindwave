@@ -52,10 +52,8 @@ class Sync:
   def synced(self, b):
     self.syncer.append(b)
     return self.syncer.count(Sync.protocol.syncbyte) == Sync.protocol.syncnum
-  def reset(self):
-    self.syncer.clear()
   def sync_it(self, src):
-    self.reset()
+    self.syncer.clear()
     while not self.synced(src.next()):
       pass
 
@@ -64,7 +62,7 @@ class Dongle:
   def __init__(self):
     baudrate = 115200
     port = '/dev/ttyUSB0'
-    timeout = 5
+    timeout = 0.015
     try: self.ser = serial.Serial(port=port, baudrate=baudrate, timeout=timeout)
     except:
       for i in range(1,4):
@@ -73,35 +71,71 @@ class Dongle:
           self.ser = serial.Serial(port=port, baudrate=baudrate, timeout=timeout)
           break
         except: continue
+    print "Dongle.ser.port: %s" % (port,)
   def control(self, val):
     self.ser.write(bytearray([val]))
   def connect(self):
+    print 'sending connect'
     self.control(self.protocol.autoconnect_byte)
   def disconnect(self):
     print 'sending disconnect'
     self.control(self.protocol.disconnect_byte)
-  def bytevals(self):
+  def xbytevals(self):
     while True:
       b = ord(self.ser.read())
       yield b
-  def xbytevals(self, bufsize=256):
+  def bytevals(self, bufsize=4096):
     buf = bytearray(bufsize)
     while True:
       n = self.ser.readinto(buf)
       for i in range(n):
         yield buf[i]
 
-class Payloader:
-  def __init__(self, src):
+class Tracker:
+  def __init__(self):
+    self.byte_count = 0
+    self.raw_count = 0
+    self.power_count = 0
+    self.signal_count = 0
+    self.blink_count = 0
+    self.bogus_count = 0
+    self.snapshots = []
+  def count_byte(self):
+    self.byte_count += 1
+  def count_raw(self):
+    self.raw_count += 1
+  def count_signal(self):
+    self.signal_count += 1
+  def count_blink(self):
+    self.blink_count += 1
+  def count_power(self):
+    self.power_count += 1
+  def count_bogus(self):
+    self.bogus_count += 1
+  def snapshot(self):
+    snap = dict(
+      timestamp = time.time(),
+      byte_count=self.byte_count,
+      raw_count=self.raw_count,
+      power_count=self.power_count,
+      signal_count=self.signal_count,
+      blink_count=self.blink_count,
+      bogus_count=self.bogus_count,
+    )
+    self.snapshots.append(snap)
+
+class Packer:
+  def __init__(self):
     self.protocol = ThinkGearProtocol
-    self.src = src
+    self.dongle = Dongle()
+    self.src = self.dongle.bytevals()
     self.syncer = Sync()
-  def read_sync(self):
-    it = self.src
-    self.syncer.reset()
-    while not self.syncer.synced(it.next()):
-      pass
-  def read_paylen_payload_and_checksum(self):
+    self.plexer = Plexer()
+    self.connected = False
+    self.tracker = Tracker()
+  def sync(self):
+    self.syncer.sync_it(self.src)
+  def read_packet(self):
     it = self.src
     paylen = it.next()
     if paylen <= self.protocol.maxpay:
@@ -112,38 +146,22 @@ class Payloader:
       paycheck = None
     payout = (paylen, payload, paycheck)
     return payout
-  def parse(self, payout):
-    pass
-
-class Packer:
-  def __init__(self):
-    self.protocol = ThinkGearProtocol
-    self.dongle = Dongle()
-    self.src = self.dongle.bytevals()
-    self.syncer = Sync()
-    self.plexer = Plexer()
-    self.connected = False
-    self.ck_counter = count()
-    self.rd_counter = count()
-  def synced_src(self):
-    self.syncer.sync_it(self.src)
-    return self.src
-  def connect_and_confirm(self):
+  def connect(self):
     self.dongle.connect()
-    while not self.connected:
-      it = self.synced_src()
-      print "Synced!"
-      paylen = it.next()
-      if paylen != 4:
-        continue
-      codetype = it.next()
-      print codetype,
-      if codetype != self.protocol.connected_code:
-        self.disconnect()
-        continue
-      self.connected = True
-      print 'connected!'
-    return True
+    while self.connected == False:
+      self.confirm()
+  def confirm(self):
+    self.sync()
+    payout = self.read_packet()
+    paylen, payload, paycheck = payout
+    if payload:
+      codetype = payload[0]
+      print "paylen: %i  codetype: %i" % (paylen, codetype)
+      if codetype == self.protocol.connected_code:  # 0xd0 
+        self.connected = True
+        print "connected"
+        return True
+    return False
   def disconnect(self):
     self.dongle.disconnect()
   def checkpay(self, payout):
@@ -168,7 +186,7 @@ class Packer:
         break
       try: codon = self.protocol.codex[codetype]
       except KeyError:
-        print "parse error unknown codetype ", codetype
+        print "parse error unknown codetype ", hex(codetype)
         break
       # ...
       if codon[0] > 1:  # datalen
@@ -181,9 +199,11 @@ class Packer:
         val = it.next() 
         if codetype == 0x02: 
           sq.send(val)
-          sq.send(self.rd_counter)
+          self.tracker.count_signal()
+          self.tracker.snapshot()
         elif codetype == 0x16: 
           be.send(val)
+          self.tracker.count_blink()
       elif datalen == 2:
         # assert codetype == 0x80
         a = it.next()
@@ -194,7 +214,7 @@ class Packer:
         t = self.protocol.signed_16_bit_big_endian(str(c))
         val = t[0]
         rd.send(val)
-        rd.send(self.rd_counter.next())
+        self.tracker.count_raw()
       else:
         # assert datalen == 24
         for j in range(0, datalen, 3):
@@ -203,28 +223,25 @@ class Packer:
           c = it.next()
           val = (a << 16) + (b << 8) + c
           pb.send(val)
+          self.tracker.count_power()
       paylen -= datalen
       # yield (codetype, val)
   def checkloop(self):
-    pay = Payloader(self.src)
     while True: 
-      self.syncer.sync_it(self.src)
-      payout = pay.read_paylen_payload_and_checksum()
+      self.sync()
+      payout = self.read_packet()
       if self.checkpay(payout):
         self.payload_gen(payout)
-        # pay.parse(payout)
       else:
-        self.ck_counter.next()
+        self.tracker.count_bogus()
 	      # print "bogus checksum?" ,payout
   def run_checkloop(self):
     try: 
       self.checkloop()
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as Completed:
       self.disconnect()
       print "Disconnected"
-      print "bogus checksums %s" % (self.ck_counter,)
-      print "raw data %s" % (self.rd_counter,)
-      raise
+      print "Tracker dict: ", self.tracker.snapshots
 
 
 class Plexer:
@@ -235,14 +252,11 @@ class Plexer:
   def signal_quality():
     while True:
       val = yield
-      rd_counter = yield
       print "Signal Quality: %i %f" % (val, time.time())
-      print "raw_data counter %s" % (rd_counter,)
   @staticmethod
   def raw_data():
     while True:
       val = yield
-      val_count = yield
       scaled = ( val + 1000 ) / 50
       # print "%12s %6i %s" % (codon, val, ')'.rjust(scaled,'-'))
       # print "Raw Data: ", val
@@ -251,7 +265,6 @@ class Plexer:
   def power_bin():
     while True:
       val = yield
-      # print "Power Bin: %s, Timestamp: %s" % (val, time.time())
   @staticmethod
   def blink_event():
     while True:
@@ -270,7 +283,7 @@ class Plexer:
     }
     try: cor = dispatch[codetype]
     except KeyError:
-      print "parse error unknown codetype ", codetype
+      print "parse error unknown codetype ", hex(codetype)
       raise
     ret = cor()
     ret.send(None)
