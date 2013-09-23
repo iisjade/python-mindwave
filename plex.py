@@ -9,40 +9,18 @@ TODO: * Write pasred raw_data with timestamp
 Only read 1 data code per payload?
 '''
 
-from collections import deque, defaultdict
-from itertools import count, takewhile
-from PyQt4 import QtGui
+from collections import deque
+from PyQt4 import QtGui, QtCore
+import pyqtgraph as pg
+import sys
 import struct
 import time
 import serial
-import numpy
-import pyqtgraph as pg
 
 #####
 
 def main():
-  pass
-
-##### work in progress below, ignore ...
-#
-'''
-class ThinkGearCodes:
-  signal_quality = 0x02
-  blink_event = 0x16
-  esense_attention = 0x04
-  esense_meditation = 0x05
-  extended_codetype = 0x55
-  raw_eeg = 0x80
-  power_bands = 0x83
-
-class Dispatcher:
-  def __init__(self):
-    pass
-  def make_entry(self, typecode, datalen, desc, parser): 
-    pass
-'''
-#
-##### work in progress above, ignore ...
+  print "main ...?"
 
 class ThinkGearProtocol:
   syncbyte = 0xaa
@@ -85,20 +63,28 @@ class Sync:
 class Dongle:
   protocol = ThinkGearProtocol
   def __init__(self):
-    self.binary_out = open('binary_out', 'w+b')
-    baudrate = 115200
-    port = '/dev/ttyUSB0'
-    timeout = 0.00001
-    try: self.ser = serial.Serial(port=port, baudrate=baudrate, timeout=timeout)
-    except:
-      for i in range(1,4):
-        port = '/dev/ttyUSB' + str(i)
-        try: 
-          self.ser = serial.Serial(port=port, baudrate=baudrate, timeout=timeout)
+    self.baudrate = 115200
+    self.port = '/dev/ttyUSB0'
+    self.timeout = 0.00001
+    self.ser = None
+    self.dongle_on()
+    self.hex_out = open('hex_out', 'w')
+    self.time_out = open('time_out', 'w')
+  def dongle_on(self):
+    for i in range(1,4):
+      self.port = '/dev/ttyUSB' + str(i)
+      try: 
+        self.ser = serial.Serial(port=self.port, baudrate=self.baudrate, timeout=self.timeout)
+        # Test if this serial device is our dongle
+        od_avg = sum([ord(i) for i in self.ser.read(10)])/10
+        if od_avg > 50:
+          print od_avg
           break
-        except: 
+        else:
           continue
-    print "Dongle.ser.port: %s" % (port,)
+      except: 
+        continue
+    print self.ser
   def control(self, val):
     self.ser.write(bytearray([val]))
   def connect(self):
@@ -110,12 +96,15 @@ class Dongle:
   def bytevals(self, bufsize=4096):
     buf = bytearray(bufsize)
     while True:
+      formatted_timestamp = '\n{:10.6f}'.format(time.time())
+      self.time_out.write(formatted_timestamp)
       n = self.ser.readinto(buf)
+      self.time_out.write("\n" + str(n))
       for i in range(n):
         yield buf[i]
   def log_bytevals(self):
     for b in self.bytevals():
-      self.binary_out.write(hex(b)+',')
+      self.hex_out.write(hex(b)+',')
       yield b
 
 class Tracker:
@@ -173,25 +162,16 @@ class Tracker:
     
 class Packer:
   def __init__(self):
-    self.fout = open('run_log', 'w')
-    self.plotWidget = pg.plot()
     self.protocol = ThinkGearProtocol
-    self.dongle = Dongle()
-    self.src = self.dongle.log_bytevals()
-    self.syncer = Sync()
-    self.plexer = Plexer()
-    # Initialize co-routines:
     self.sq = Plexer.plexit(0x02)
     self.be = Plexer.plexit(0x16)
     self.rd = Plexer.plexit(0x80)
     self.pb = Plexer.plexit(0x83)
-    self.lg = Plexer.plexit('logger')
-    self.lg.send(self.fout)
-    self.rd.send(self.plotWidget)
-    self.connected = False
+    self.dongle = Dongle()
+    self.syncer = Sync()
     self.tracker = Tracker()
-  def sync(self):
-    self.syncer.sync_it(self.src)
+    self.src = self.dongle.log_bytevals()
+    self.connected = False
   def read_packet(self):
     it = self.src
     paylen = it.next()
@@ -208,7 +188,7 @@ class Packer:
     while self.connected == False:
       self.confirm()
   def confirm(self):
-    self.sync()
+    self.syncer.sync_it(self.src)
     payout = self.read_packet()
     paylen, payload, paycheck = payout
     if payload:
@@ -222,7 +202,6 @@ class Packer:
   def disconnect(self):
     self.dongle.disconnect()
     self.connected = False
-    # Should confirm disconnect
   def checkpay(self, payout):
     paylen, payload, paycheck = payout
     if paylen <= self.protocol.maxpay:
@@ -232,7 +211,6 @@ class Packer:
     return (paylen - 1, it.next())
   def payload_gen(self, payout):
     trace = str(payout) + "," + time.time().__format__('.16') + "\n"
-    self.lg.send(trace)
     paylen, payload, paycheck = payout
     it = iter(payload)
     while paylen > 0:
@@ -247,10 +225,10 @@ class Packer:
         break
       if codon[0] > 1:  # datalen
         paylen, datalen = self.turmite(paylen, it)
-      else: datalen = 1
-      assert datalen == codon[0]
+      else: 
+        datalen = 1
+        assert datalen == codon[0]
       if datalen == 1:
-        # assert codetype < 0x80
         paylen, val = self.turmite(paylen, it)
         if codetype == 0x02: 
           self.sq.send(val)
@@ -260,7 +238,6 @@ class Packer:
           self.be.send(val)
           self.tracker.count_blink()
       elif datalen == 2:
-        # assert codetype >= 0x80
         paylen, a = self.turmite(paylen, it)
         paylen, b = self.turmite(paylen, it)
         c = bytearray(2)
@@ -281,8 +258,9 @@ class Packer:
       else:
         print "not implemented - datalen %d" % datalen
   def checkloop(self):
-    while True: 
-      self.sync()
+    self.connect()
+    while self.connected: 
+      self.syncer.sync_it(self.src)
       payout = self.read_packet()
       if self.checkpay(payout):
         self.payload_gen(payout)
@@ -300,49 +278,36 @@ class Packer:
       print bin(paycheck)
     else:
       print "no checksum"
-  def run_checkloop(self):
-    try: 
-      self.disconnect()
-      time.sleep(1)
-      self.connect()
-      self.checkloop()
-    except KeyboardInterrupt as Completed:
-      self.disconnect()
-      print "Disconnected"
-      print "Tracker dict: ", self.tracker.snapshots[-1]
-      self.fout.close()
-      self.dongle.binary_out.close()
 
 class Plexer:
   protocol=ThinkGearProtocol
-  def __init__(self):
-    pass
   @staticmethod
   def signal_quality():
     while True:
-      val = yield
+      with open('signal_quality', 'a') as f:
+        val = yield
+        rec = (val, time.time())
+        f.write(str(rec))
+        f.write("\n")
   @staticmethod
   def blink_event():
     while True:
       val = yield
   @staticmethod
   def raw_data():
-    bar = deque([0], 1024)
-    foo = deque([0], 1024)
-    i = 0
-    pw = yield
+    #raw_plot = Wui.raw_plot
+    #raw_plot.send(None)
+    delta_time = deque([0, 0], 2)
     while True:
-      val = yield
-      bar.append(i)
-      foo.append(val)
-      scaled = ( val + 100 ) / 5
-      print "%i %6i %s" % (i, val, ')'.rjust(scaled,'-'))
-      i += 1
-      if i % 1024 == 0:
-        pw.plot(bar, foo, clear=True)
-        pg.QtGui.QApplication.processEvents()
-      # print "Raw Data: ", val
-      # print "val #%d: %d" % (val_count, val) 
+      with open('raw_out', 'a') as f:
+        delta_time.append(time.time())
+        this_delta = delta_time[1] - delta_time[0]
+        formatted_timestamp = '{:10.6f}'.format(this_delta)
+        val = yield
+        rec = (val, formatted_timestamp)
+        #raw_plot.send(val)
+        f.write(str(rec[0]) + "," + str(rec[1]))
+        f.write("\n")
   @staticmethod
   def power_bin():
     while True:
@@ -356,10 +321,14 @@ class Plexer:
       high_gamma = yield
   @staticmethod
   def logger():
-    fout = yield
+    set_write = False
     while True:
       trace = yield
-      fout.write(trace)  
+      if type(trace) == file:
+        set_write = True
+      if set_write:
+        # fout.write(trace)
+        pass
   @staticmethod
   def plexit(codetype):
     dispatch = {
@@ -380,5 +349,51 @@ class Plexer:
     ret.send(None)
     return ret
 
+class Wui:
+  def __init__(self):
+    self.packer = Packer()
+    self.app = QtGui.QApplication(sys.argv) 
+    self.widget = QtGui.QWidget()
+    self.connect_btn = QtGui.QPushButton('Connect')
+    self.disconnect_btn = QtGui.QPushButton('Disconnect')
+    self.record_chkbx = QtGui.QCheckBox('Record Data')
+    self.plot = pg.PlotWidget()
+    self.plot.setRange(yRange=(500, -500))
+    self.layout = QtGui.QGridLayout()
+    self.widget.setLayout(self.layout)
+    self.layout.addWidget(self.connect_btn, 0, 0)
+    self.layout.addWidget(self.disconnect_btn, 1, 0)
+    self.layout.addWidget(self.record_chkbx, 2, 0)
+    self.layout.addWidget(self.plot, 0, 3, 5, 1)
+    self.record_chkbx.stateChanged.connect(self.write_file)
+    self.connect_btn.clicked.connect(self.send_connect)
+    self.disconnect_btn.clicked.connect(self.send_disconnect)
+  def send_connect(self):
+    print "sending connect"
+    self.packer.connect()
+    self.packer.checkloop()
+  def send_disconnect(self):
+    self.packer.disconnect()
+  def go(self):
+    self.widget.show()
+    self.app.exec_()
+  def write_file(self):
+    pass
+  def raw_plot(self):
+    self.widget.show()
+    self.app.exec_()
+    x = deque([0], 1024)
+    y = deque([0], 1024)
+    i = 0
+    while True:
+      val = yield 
+      x.append(i)
+      y.append(val)
+      i += 1
+      if i % 16 == 0:
+        self.plot.plot(x, y, clear=True)
+        pg.QtGui.QApplication.processEvents()
+
+
 if __name__ == '__main__':
-  main()
+    main()
