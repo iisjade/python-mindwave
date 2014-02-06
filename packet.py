@@ -21,12 +21,15 @@ class ThinkGearProtocol(object):
   autoconnect_byte = 0xc2
   connected_code = 0xd0
   disconnected_code = 0xd2
+  standby_code = 0xd4
   @staticmethod
   def checksum(seq):
     return ~sum(seq) & 0xff
   @staticmethod
   def datalen(codetype):
     if codetype < 0x80:
+      return 1
+    elif codetype == ThinkGearProtocol.standby_code:
       return 1
     elif codetype == ThinkGearProtocol.connected_code:
       return 2
@@ -93,6 +96,8 @@ class Packet(object):
   def __init__(self, src):
     self.is_valid = False
     self.paylen = src.next()
+    self.payload_data = None
+    self.paycheck = None
     if self.paylen <= ThinkGearProtocol.maxpay: 
       self.payload_data = list(islice(src, self.paylen))
       self.paycheck = src.next()
@@ -118,6 +123,18 @@ class Packet(object):
       dataslice = islice(self.payload_data, pos, next_pos)
       pos = next_pos
       yield (codetype, dataslice) 
+  def __repr__(self):
+    s = "paylen " + str(self.paylen) 
+    if self.is_valid:
+      s += "\n" + "valid packet"
+    else:
+      s += "\n" + "invalid packet"
+    if self.payload_data:
+      s += "\n payload: " + str(self.payload_data)
+    if self.paycheck:
+      s += "\n paycheck: " + str(self.paycheck)
+    s += "\n"
+    return s
 
 class Bytestream(object):
   def __init__(self, dev):
@@ -150,7 +167,10 @@ class Coordinator(object):
     self.connected = False
     self.ui = UI(self)
     self.handlers = self.init_handlers()
+    self.logfile = open("logfile", "w")
+    self.datafile = open("datafile", "w")
     self.ui.app.exec_()
+    # never ... mind
   def init_handlers(self):
     d = {
       ThinkGearProtocol.signal_quality : self.signal_quality_handler(),
@@ -163,22 +183,31 @@ class Coordinator(object):
       handler.send(None)
     return d
   def log(self, a, b=None):
+    s = "\n sequence number: " + str(self.bs.sync_count)
+    s += "\n timestamp: " + repr(self.bs.last_synced)
     if b:
-      print a, list(b)
+      s += "\n" + ','.join([str(a), str(list(b))])
     else:
-      print a
+      s += "\n" + str(a)
+    self.logfile.write(s)
   def disconnect(self):
     self.dev.disconnect()
     self.connected = False
   def connect(self, retry = 5):
     hangtime = 2
     if self.connected:
+      print "already connected, disconnecting first"
       self.disconnect()
       time.sleep(hangtime)
+    print "sending connect"
     self.dev.connect()
-    while not self.connected:
+    print "sent connect"
+    attempts = 0
+    while not self.connected and attempts < 1024:
+      self.dev.connect()
       p = Packet(self.bs.synced_src)
       if not p.is_valid:
+        print "invalid packet"
         self.log(p)
         continue
       for codetype, data in p.payload_iterator: 
@@ -187,13 +216,16 @@ class Coordinator(object):
           self.connected = True
           break
         else:
+          "got something other than connection code in packet"
           self.log(codetype, data)
-      if self.connected:
-        break
+      attempts += 1
     if not self.connected and (retry > 0):
       self.dev.disconnect()
       time.sleep(hangtime)
+      print "retrying," + str(retry - 1) + "retrys left"
       self.connect(retry - 1)
+    elif not self.connected and retry == 0:
+      print "exceeded max retrys, failure"
   def receive(self):
     while self.connected:
       p = Packet(self.bs.synced_src)
@@ -210,6 +242,7 @@ class Coordinator(object):
     while True:
       data = yield
       val, = data
+      self.ui.signalquality_plot_.send(val)
   def esense_attention_handler(self):
     while True:
       data = yield
@@ -222,7 +255,10 @@ class Coordinator(object):
     while True:
       data = yield
       val = ThinkGearProtocol.parse_eeg(data)
-      self.ui.raw_plot_.send(val)
+      sequence_number = self.bs.sync_count
+      t = (val, sequence_number)
+      self.ui.raw_plot_.send(t)
+      self.write_packet(val, sequence_number)
   def power_bands_handler(self):
     while True:
       data = yield
@@ -231,6 +267,9 @@ class Coordinator(object):
       else:
         vals = ThinkGearProtocol.parse_power(data)
         self.ui.fft_plot_.send(vals)
+  def write_packet(self, val, sequence_number):
+    s = '\n' + str(sequence_number) + ',' + str(val)
+    self.datafile.write(s)
 
 class UI(object):
   def __init__(self, coordinator):
@@ -243,8 +282,10 @@ class UI(object):
     self.record_chkbx = QtGui.QCheckBox('Record Data')
     self.rawplot = pg.PlotWidget()
     self.fftplot = pg.PlotWidget()
+    self.sqplot = pg.PlotWidget()
     self.rawplot.setRange(yRange=(500, -500))
     self.fftplot.setRange(yRange=(500000, 0))
+    self.sqplot.setRange(yRange=(0, 200))
     self.layout = QtGui.QGridLayout()
     self.widget.setLayout(self.layout)
     self.layout.addWidget(self.connect_btn, 0, 0)
@@ -253,6 +294,7 @@ class UI(object):
     self.layout.addWidget(self.record_chkbx, 0, 3)
     self.layout.addWidget(self.rawplot, 1, 0, 2, 4)
     self.layout.addWidget(self.fftplot, 3, 0, 2, 4)
+    self.layout.addWidget(self.sqplot, 5, 0, 2, 4)
     self.record_chkbx.stateChanged.connect(self.write_file)
     self.connect_btn.clicked.connect(self.send_connect)
     self.disconnect_btn.clicked.connect(self.send_disconnect)
@@ -264,12 +306,18 @@ class UI(object):
     self.raw_plot_.send(None)
     self.fft_plot_ = self.fft_plot()
     self.fft_plot_.send(None)
+    self.sq_x = deque([0], 2)
+    self.sq_y = deque([0], 2)
+    self.signalquality_plot_ = self.signalquality_plot()
+    self.signalquality_plot_.send(None)
   def send_connect(self):
     self.coordinator.connect()
   def send_disconnect(self):
     print "sending disconnect"
     self.raw_x.clear()
     self.raw_y.clear()
+    self.sq_x.clear()
+    self.sq_y.clear()
     self.coordinator.disconnect()
     print "disconnected"
   def acquire(self):
@@ -277,13 +325,11 @@ class UI(object):
   def write_file(self):
     pass
   def raw_plot(self):
-    sequence_num = 0
     while True:
-      val = yield
-      self.raw_x.append(sequence_num)
+      val, seq_num = yield
+      self.raw_x.append(seq_num)
       self.raw_y.append(val)
-      sequence_num += 1
-      if sequence_num % 32 == 0:
+      if seq_num % 32 == 0:
         self.rawplot.plot(self.raw_x, self.raw_y, clear=True)
         pg.QtGui.QApplication.processEvents()
   def fft_plot(self):
@@ -291,9 +337,22 @@ class UI(object):
     while True:
       vals = yield
       self.fftplot.plot(p_bands, vals, clear=True, symbol='s', pen=None)
+  def signalquality_plot(self):
+    sq_num = 0
+    while True:
+      val = yield
+      self.sq_x.append(sq_num)
+      self.sq_y.append(val)
+      self.sqplot.plot(self.sq_x, self.sq_y, clear=True)
+      sq_num += 1
+      
 
 def main():
-  Coordinator()
+  try:
+    c = Coordinator()
+  finally:
+    c.logfile.close()
+    c.datafile.close()
 
 if __name__ == '__main__':
   main()
