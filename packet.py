@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 from itertools import islice
 from collections import deque
 from PyQt4 import QtGui, QtCore
@@ -7,6 +8,7 @@ import time
 import serial
 import fftw3
 import numpy
+import signal
 
 class ThinkGearProtocol(object):
   syncnum = 2
@@ -193,11 +195,9 @@ class Coordinator(object):
       s += "\n" + str(a)
     self.logfile.write(s)
   def disconnect(self):
-    self.dev.ser.flush()
     self.dev.disconnect()
     self.connected = False
   def connect(self, retry = 5):
-    self.dev.ser.flush()
     hangtime = 2
     if self.connected:
       print "already connected, disconnecting first"
@@ -274,6 +274,11 @@ class Coordinator(object):
   def write_packet(self, val, sequence_number):
     s = '\n' + str(sequence_number) + ',' + str(val)
     self.datafile.write(s)
+  def cleanup(self):
+    self.logfile.close()
+    self.datafile.close()
+    self.dev.ser.close()
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
 
 class UI(object):
   def __init__(self, coordinator):
@@ -285,11 +290,11 @@ class UI(object):
     self.acquire_btn = QtGui.QPushButton('Acquire')
     self.record_chkbx = QtGui.QCheckBox('Record Data')
     self.rawplot = pg.PlotWidget()
-    self.fftplot = pg.PlotWidget()
-    self.sqplot = pg.PlotWidget()
+    self.ns_fftplot = pg.PlotWidget()
+    self.rd_fftplot = pg.PlotWidget()
     self.rawplot.setRange(yRange=(500, -500))
-    self.fftplot.setRange(yRange=(500000, 0))
-    self.sqplot.setRange(yRange=(30, 90))
+    self.ns_fftplot.setRange(yRange=(20, 0))
+    self.rd_fftplot.setRange(yRange=(0, 90))
     self.layout = QtGui.QGridLayout()
     self.widget.setLayout(self.layout)
     self.layout.addWidget(self.connect_btn, 0, 0)
@@ -297,8 +302,8 @@ class UI(object):
     self.layout.addWidget(self.acquire_btn, 0, 2)
     self.layout.addWidget(self.record_chkbx, 0, 3)
     self.layout.addWidget(self.rawplot, 1, 0, 2, 4)
-    self.layout.addWidget(self.fftplot, 3, 0, 2, 4)
-    self.layout.addWidget(self.sqplot, 5, 0, 2, 4)
+    self.layout.addWidget(self.ns_fftplot, 3, 0, 2, 4)
+    self.layout.addWidget(self.rd_fftplot, 5, 0, 2, 4)
     self.record_chkbx.stateChanged.connect(self.write_file)
     self.connect_btn.clicked.connect(self.send_connect)
     self.disconnect_btn.clicked.connect(self.send_disconnect)
@@ -329,31 +334,31 @@ class UI(object):
   def write_file(self):
     pass
   def raw_plot(self):
-    bins = range(0,256)
     fft_size = 512
+    bins = [i for i in range(fft_size/2)]
     while True:
       val, seq_num = yield
       self.raw_x.append(seq_num)
       self.raw_y.append(val)
-      bins = [i for i in range(fft_size/2)]
       if seq_num % 32 == 0 and len(self.raw_y) >= fft_size:
         raw_y_list = list(self.raw_y)
         inputa = numpy.array(raw_y_list[-fft_size:], dtype=complex)
-        hann_window = numpy.hanning(fft_size)
-        inputa = inputa * hann_window
+        #hann_window = numpy.hanning(fft_size)
+        #inputa = inputa * hann_window
         #inputa = inputa * flattop_window
         outputa = numpy.zeros(fft_size, dtype=complex)
-        fft = fftw3.Plan(inputa,outputa, direction='forward', flags=['estimate'])
+        fft = fftw3.Plan(inputa, outputa, direction='forward', flags=['estimate'])
         fft.execute()
         outputa = (numpy.log10(numpy.abs(outputa)) * 20)[:fft_size/2]
         self.rawplot.plot(self.raw_x, self.raw_y, clear=True)
-        self.sqplot.plot(bins, outputa, clear=True)
+        self.rd_fftplot.plot(bins, outputa, clear=True)
         pg.QtGui.QApplication.processEvents()
   def ns_fft_plot(self):
     p_bands = range(8)
     while True:
       vals = yield
-      self.fftplot.plot(p_bands, vals, clear=True, symbol='s', pen=None)
+      ln_vals = numpy.log(vals)
+      self.ns_fftplot.plot(p_bands, ln_vals, clear=True, symbol='s', pen=None)
   def signalquality_plot(self):
     sq_num = 0
     while True:
@@ -368,8 +373,7 @@ def main():
   try:
     c = Coordinator()
   finally:
-    c.logfile.close()
-    c.datafile.close()
+    c.cleanup()
 
 if __name__ == '__main__':
   main()
