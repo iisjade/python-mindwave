@@ -5,6 +5,8 @@ import pyqtgraph as pg
 import sys 
 import time
 import serial
+import fftw3
+import numpy
 
 class ThinkGearProtocol(object):
   syncnum = 2
@@ -64,7 +66,7 @@ class Device(object):
   def __init__(self):
     self.baudrate = 57600 * 2
     self.port = None
-    self.timeout = .0001
+    self.timeout = 1
     self.ser = None
     self.device_on()
   def device_on(self):
@@ -191,9 +193,11 @@ class Coordinator(object):
       s += "\n" + str(a)
     self.logfile.write(s)
   def disconnect(self):
+    self.dev.ser.flush()
     self.dev.disconnect()
     self.connected = False
   def connect(self, retry = 5):
+    self.dev.ser.flush()
     hangtime = 2
     if self.connected:
       print "already connected, disconnecting first"
@@ -266,7 +270,7 @@ class Coordinator(object):
         print data
       else:
         vals = ThinkGearProtocol.parse_power(data)
-        self.ui.fft_plot_.send(vals)
+        self.ui.ns_fft_plot_.send(vals)
   def write_packet(self, val, sequence_number):
     s = '\n' + str(sequence_number) + ',' + str(val)
     self.datafile.write(s)
@@ -285,7 +289,7 @@ class UI(object):
     self.sqplot = pg.PlotWidget()
     self.rawplot.setRange(yRange=(500, -500))
     self.fftplot.setRange(yRange=(500000, 0))
-    self.sqplot.setRange(yRange=(0, 200))
+    self.sqplot.setRange(yRange=(30, 90))
     self.layout = QtGui.QGridLayout()
     self.widget.setLayout(self.layout)
     self.layout.addWidget(self.connect_btn, 0, 0)
@@ -304,8 +308,8 @@ class UI(object):
     self.raw_y = deque([0], 1024)
     self.raw_plot_ = self.raw_plot()
     self.raw_plot_.send(None)
-    self.fft_plot_ = self.fft_plot()
-    self.fft_plot_.send(None)
+    self.ns_fft_plot_ = self.ns_fft_plot()
+    self.ns_fft_plot_.send(None)
     self.sq_x = deque([0], 2)
     self.sq_y = deque([0], 2)
     self.signalquality_plot_ = self.signalquality_plot()
@@ -325,14 +329,27 @@ class UI(object):
   def write_file(self):
     pass
   def raw_plot(self):
+    bins = range(0,256)
+    fft_size = 512
     while True:
       val, seq_num = yield
       self.raw_x.append(seq_num)
       self.raw_y.append(val)
-      if seq_num % 32 == 0:
+      bins = [i for i in range(fft_size/2)]
+      if seq_num % 32 == 0 and len(self.raw_y) >= fft_size:
+        raw_y_list = list(self.raw_y)
+        inputa = numpy.array(raw_y_list[-fft_size:], dtype=complex)
+        hann_window = numpy.hanning(fft_size)
+        inputa = inputa * hann_window
+        #inputa = inputa * flattop_window
+        outputa = numpy.zeros(fft_size, dtype=complex)
+        fft = fftw3.Plan(inputa,outputa, direction='forward', flags=['estimate'])
+        fft.execute()
+        outputa = (numpy.log10(numpy.abs(outputa)) * 20)[:fft_size/2]
         self.rawplot.plot(self.raw_x, self.raw_y, clear=True)
+        self.sqplot.plot(bins, outputa, clear=True)
         pg.QtGui.QApplication.processEvents()
-  def fft_plot(self):
+  def ns_fft_plot(self):
     p_bands = range(8)
     while True:
       vals = yield
@@ -343,7 +360,7 @@ class UI(object):
       val = yield
       self.sq_x.append(sq_num)
       self.sq_y.append(val)
-      self.sqplot.plot(self.sq_x, self.sq_y, clear=True)
+      #self.sqplot.plot(self.sq_x, self.sq_y, clear=True)
       sq_num += 1
       
 
